@@ -26,7 +26,8 @@ Verdict: "CHANGES" if there is any blocker or major, otherwise "LGTM".
 ## The driver's latest message (what it says it did, and its answers to you)
 {{DRIVER_MESSAGE}}
 
-## The diff under review (uncommitted changes vs HEAD)
+## The diff under review
+Changes since the last step you approved (or since HEAD on the first step). Earlier approved steps are already in the working tree — read those files for context, but review only this step.
 ```diff
 {{DIFF}}
 ```

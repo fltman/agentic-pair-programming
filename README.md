@@ -18,9 +18,21 @@ Starta om Claude Code i projektet och kör sedan:
 
 ```
 /pair Lägg till export till CSV i rapportvyn
+/pair auto Bygg import av CSV med validering och tester
 /pair status
 /pair off
 ```
+
+### Autopilot
+
+Med `/pair auto <mål>` lämnar paret inte tillbaka ordet efter varje LGTM, utan fortsätter själv med nästa steg. Du får tillbaka ordet när:
+- föraren avslutar med `PAIR: KLART` och navigatören har godkänt sista steget,
+- föraren behöver ett beslut av dig (`PAIR: FRÅGA`),
+- föraren och navigatören inte blir överens, eller navigatören inte blir nöjd på tre rundor,
+- föraren stannar utan ny kod, eller
+- `PAIR_MAX_STEPS` (8) godkända steg har passerat.
+
+`/pair auto off` stänger av autopiloten men låter paret fortsätta.
 
 Committa gärna `.claude/`-filerna i projektet. `.pair/` ignorerar sig själv.
 
@@ -28,16 +40,22 @@ Committa gärna `.claude/`-filerna i projektet. `.pair/` ignorerar sig själv.
 
 | Del | Roll |
 |---|---|
-| `.claude/hooks/codex-navigator.py` | Stop-hook. Tar diffen (staged + unstaged + ospårat), kör `codex exec --sandbox read-only --output-schema …` och blockerar eller släpper. |
+| `.claude/hooks/codex-navigator.py` | Stop-hook. Tar en ögonblicksbild av arbetsträdet (inklusive ospårade filer, via ett temporärt index), diffar mot senaste LGTM, kör `codex exec --sandbox read-only --output-schema …` och blockerar eller släpper. |
 | `.claude/hooks/navigator-prompt.md` | Navigatörens regler: granska mot målet, inga stilnitpickar, verifiera innan du påstår. |
 | `.claude/hooks/navigator-schema.json` | Strukturerat svar: `verdict`, `summary`, `comments[{severity, location, comment}]`. |
 | `.claude/skills/pair/SKILL.md` | `/pair`: startar/stoppar sessionen och ger Claude förarens regler. |
-| `.pair/` (i projektet) | `session.md` (målet, finns = aktivt), `state.json`, `log.md` (hela dialogen). |
+| `.pair/` (i projektet) | `session.md` (målet, finns = aktivt), `autopilot` (finns = på), `state.json`, `log.md` (hela dialogen). |
 
 Skyddsräcken:
 - Utfallet (LGTM eller ändringar) bestäms i koden utifrån allvarlighetsgraden, inte av modellens egen etikett.
-- Samma diff granskas aldrig två gånger.
+- Varje granskning gäller bara det som ändrats sedan senaste LGTM. Godkänd kod granskas inte om, och samma tillstånd granskas aldrig två gånger.
 - Max `PAIR_MAX_ROUNDS` (3) rundor per tur.
 - Om Codex fallerar släpps Claude alltid.
 
-Miljövariabler: `PAIR_MAX_ROUNDS` och `PAIR_CODEX_MODEL`.
+Miljövariabler: `PAIR_MAX_ROUNDS`, `PAIR_MAX_STEPS`, `PAIR_CODEX_MODEL` och `PAIR_CODEX_BIN`.
+
+## Tester
+
+```bash
+python3 -m unittest discover tests   # falsk codex, inga krediter
+```
