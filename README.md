@@ -1,5 +1,7 @@
 # agentic-pair-programming
 
+[![Patreon](https://img.shields.io/badge/Patreon-AndersBjarby-F96854?logo=patreon&logoColor=white)](https://www.patreon.com/AndersBjarby)
+
 Parprogrammering mellan två agenter: **Claude Code kör, Codex navigerar.**
 
 Varje gång Claude stannar granskar Codex de ocommittade ändringarna mot målet för sessionen. Har navigatören invändningar (blocker/major) får Claude tillbaka dem innan du ser svaret. Claude måste då ta ställning till varje punkt: åtgärda den eller invända med skäl. Du får tillbaka ordet när navigatören säger LGTM, när föraren står fast vid sin lösning, eller efter tre rundor.
