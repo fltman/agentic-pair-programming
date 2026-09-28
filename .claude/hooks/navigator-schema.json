@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "comments"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["LGTM", "CHANGES"] },
+    "summary": { "type": "string" },
+    "comments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "location", "comment"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["blocker", "major", "minor", "question"] },
+          "location": { "type": "string" },
+          "comment": { "type": "string" }
+        }
+      }
+    }
+  }
+}
