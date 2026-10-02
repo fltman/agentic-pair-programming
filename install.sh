@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installera Codex-navigatören i ett projekt: ./install.sh /sökväg/till/projekt
+# Installera navigatören (Codex eller Copilot) i ett projekt: ./install.sh /sökväg/till/projekt
 set -euo pipefail
 
 src="$(cd "$(dirname "$0")" && pwd)/.claude"

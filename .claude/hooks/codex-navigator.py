@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Stop hook: Codex acts as navigator and reviews what Claude (the driver) just wrote.
+"""Stop hook: Codex (or GitHub Copilot) acts as navigator and reviews what Claude (the driver) just wrote.
+
+The navigator CLI is chosen with PAIR_NAVIGATOR: `codex` (default) or `copilot`.
 
 Inactive unless `.pair/session.md` exists in the project (created by /pair).
 Each review covers what changed since the last LGTM checkpoint (a git tree
@@ -22,10 +24,15 @@ from pathlib import Path
 
 MAX_ROUNDS = int(os.environ.get("PAIR_MAX_ROUNDS", "3"))
 MAX_STEPS = int(os.environ.get("PAIR_MAX_STEPS", "8"))
+NAVIGATOR = os.environ.get("PAIR_NAVIGATOR", "codex").strip().lower()
 CODEX_BIN = os.environ.get("PAIR_CODEX_BIN", "codex")
+COPILOT_BIN = os.environ.get("PAIR_COPILOT_BIN", "copilot")
+NAVIGATOR_NAMES = {"codex": "Codex", "copilot": "Copilot"}
+NAVIGATOR_NAME = NAVIGATOR_NAMES.get(NAVIGATOR, NAVIGATOR)
 MAX_DIFF_CHARS = 150_000
-CODEX_TIMEOUT = 540  # keep below the hook timeout in settings.json (600)
+NAVIGATOR_TIMEOUT = 540  # keep below the hook timeout in settings.json (600)
 HERE = Path(__file__).resolve().parent
+SCHEMA_FILE = HERE / "navigator-schema.json"
 MARKER = re.compile(r"PAIR:\s*(KLART|FRÅGA)\s*$", re.MULTILINE)
 SCOPE = [
     "--", ".",
@@ -110,16 +117,86 @@ def run_codex(root, prompt):
             "--ephemeral",
             "--skip-git-repo-check",
             "-C", str(root),
-            "--output-schema", str(HERE / "navigator-schema.json"),
+            "--output-schema", str(SCHEMA_FILE),
             "-o", str(out),
             "-",
         ]
         if os.environ.get("PAIR_CODEX_MODEL"):
             cmd[2:2] = ["-m", os.environ["PAIR_CODEX_MODEL"]]
-        proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=CODEX_TIMEOUT)
+        proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=NAVIGATOR_TIMEOUT)
         if proc.returncode != 0 or not out.exists():
             raise RuntimeError((proc.stderr or proc.stdout).strip()[-800:])
         return json.loads(out.read_text(encoding="utf-8"))
+
+
+COPILOT_OUTPUT = """
+## Output format
+Your final reply must be exactly one JSON object that matches this JSON Schema, with no code fences and no text before or after it:
+```json
+{schema}
+```
+"""
+
+
+def run_copilot(root, prompt):
+    """Copilot CLI has no output schema or read-only sandbox: the schema goes into the prompt,
+    the reply is parsed and validated, and file writes, shell and network are denied."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # The prompt goes in a file: the diff alone can exceed Linux's 128 KiB limit for one argv string
+        brief = Path(tmp) / "navigator-brief.md"
+        brief.write_text(prompt + COPILOT_OUTPUT.format(schema=SCHEMA_FILE.read_text(encoding="utf-8").strip()),
+                         encoding="utf-8")
+        cmd = [
+            COPILOT_BIN,
+            "-p", f"Read the file {brief} and follow its instructions exactly. Do not modify any files.",
+            "-s", "--no-color",
+            "--allow-all-tools",  # needed in non-interactive mode; the deny rules below take precedence
+            "--deny-tool", "write",
+            "--deny-tool", "shell",
+            "--deny-tool", "url",
+            "--disable-builtin-mcps",
+            "--no-ask-user",
+            "--add-dir", tmp,
+            "-C", str(root),
+        ]
+        if os.environ.get("PAIR_COPILOT_MODEL"):
+            cmd += ["--model", os.environ["PAIR_COPILOT_MODEL"]]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=NAVIGATOR_TIMEOUT,
+                              stdin=subprocess.DEVNULL)
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout).strip()[-800:])
+        return parse_review(proc.stdout)
+
+
+def parse_review(text):
+    """Pull the JSON object out of a free-text reply (tolerates code fences or stray prose)."""
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError(f"no JSON object in the navigator's reply: {text.strip()[:300]}")
+    return json.loads(text[start:end + 1])
+
+
+def validate_review(review):
+    """Check the shape the rest of the hook relies on; Codex enforces it, Copilot does not."""
+    severities = json.loads(SCHEMA_FILE.read_text(encoding="utf-8"))[
+        "properties"]["comments"]["items"]["properties"]["severity"]["enum"]
+    if not isinstance(review, dict) or not isinstance(review.get("summary"), str) \
+            or not isinstance(review.get("comments"), list):
+        raise ValueError("the navigator's reply lacks summary/comments")
+    for c in review["comments"]:
+        if not isinstance(c, dict) or c.get("severity") not in severities \
+                or not all(isinstance(c.get(k), str) for k in ("location", "comment")):
+            raise ValueError(f"malformed navigator comment: {json.dumps(c, ensure_ascii=False)[:300]}")
+    return review
+
+
+NAVIGATORS = {"codex": run_codex, "copilot": run_copilot}
+
+
+def run_navigator(root, prompt):
+    if NAVIGATOR not in NAVIGATORS:
+        raise ValueError(f"unknown PAIR_NAVIGATOR {NAVIGATOR!r} (use: {', '.join(NAVIGATORS)})")
+    return validate_review(NAVIGATORS[NAVIGATOR](root, prompt))
 
 
 def log(pair_dir, heading, body):
@@ -196,10 +273,10 @@ def main():
         .replace("{{DIFF}}", diff)
     )
     try:
-        review = run_codex(root, prompt)
+        review = run_navigator(root, prompt)
     except Exception as exc:  # a broken navigator must never trap the driver
         log(pair_dir, "Navigatören kunde inte köras", str(exc))
-        emit({"systemMessage": f"🧭 Codex-granskningen misslyckades och hoppades över: {str(exc)[:300]}"})
+        emit({"systemMessage": f"🧭 {NAVIGATOR_NAME}-granskningen misslyckades och hoppades över: {str(exc)[:300]}"})
 
     comments = review.get("comments", [])
     # Decide the verdict from severities rather than trusting the model's own label
@@ -218,7 +295,7 @@ def main():
         emit({
             "decision": "block",
             "reason": (
-                f"🧭 Navigatören (Codex), runda {state['rounds']}/{MAX_ROUNDS}:\n\n{rendered}\n\n"
+                f"🧭 Navigatören ({NAVIGATOR_NAME}), runda {state['rounds']}/{MAX_ROUNDS}:\n\n{rendered}\n\n"
                 "Som förare: ta ställning till varje punkt. Åtgärda den, eller invänd med ett konkret skäl "
                 "om du tror att navigatören har fel — lyd inte blint och avfärda inte lättvindigt. "
                 "Avsluta med en kort lista: punktnummer → fixat / invänder (varför)."
@@ -241,7 +318,7 @@ def main():
         emit({"systemMessage": f"🧭 Autopilot pausad efter {MAX_STEPS} godkända steg — säg till om paret ska fortsätta."})
     emit({
         "decision": "block",
-        "reason": f"🧭 Navigatören (Codex): LGTM, steg {state['steps']}/{MAX_STEPS}. {summary}{notes}\n\n{AUTOPILOT_CONTINUE}",
+        "reason": f"🧭 Navigatören ({NAVIGATOR_NAME}): LGTM, steg {state['steps']}/{MAX_STEPS}. {summary}{notes}\n\n{AUTOPILOT_CONTINUE}",
     })
 
 
