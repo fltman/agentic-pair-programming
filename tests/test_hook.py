@@ -1,4 +1,4 @@
-"""Tests for the navigator Stop hook, using a fake codex. Run: python3 -m unittest discover tests"""
+"""Tests for the navigator Stop hook, using a fake codex and a fake copilot. Run: python3 -m unittest discover tests"""
 import json
 import os
 import subprocess
@@ -9,6 +9,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / ".claude" / "hooks" / "codex-navigator.py"
 FAKE = Path(__file__).resolve().parent / "fake_codex.py"
+FAKE_COPILOT = Path(__file__).resolve().parent / "fake_copilot.py"
 
 LGTM = {"verdict": "LGTM", "summary": "Ser bra ut.", "comments": []}
 CHANGES = {
@@ -19,6 +20,8 @@ CHANGES = {
 
 
 class HookTest(unittest.TestCase):
+    NAVIGATOR_ENV = {"PAIR_CODEX_BIN": str(FAKE)}
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -53,7 +56,7 @@ class HookTest(unittest.TestCase):
         environ = {
             **os.environ,
             "CLAUDE_PROJECT_DIR": str(self.root),
-            "PAIR_CODEX_BIN": str(FAKE),
+            **self.NAVIGATOR_ENV,
             "FAKE_REVIEW": json.dumps(review),
             "FAKE_PROMPT_OUT": str(self.prompt_file),
             **env,
@@ -227,6 +230,56 @@ class HookTest(unittest.TestCase):
         self.write("stats.py", "step 1\n")
         out = self.run_hook(LGTM, continuing=False, PAIR_MAX_STEPS="2")
         self.assertEqual(out["decision"], "block")
+
+
+class CopilotHookTest(HookTest):
+    """Every pairing test again, with Copilot as navigator."""
+    NAVIGATOR_ENV = {"PAIR_NAVIGATOR": "copilot", "PAIR_COPILOT_BIN": str(FAKE_COPILOT)}
+
+    def test_prompt_asks_for_schema(self):
+        self.start()
+        self.write("stats.py", "changed\n")
+        self.run_hook()
+        self.assertIn("## Output format", self.prompt())
+        self.assertIn('"severity"', self.prompt())
+
+    def test_navigator_is_read_only(self):
+        self.start()
+        self.write("stats.py", "changed\n")
+        args_file = self.root.parent / f"{self.root.name}-args.json"
+        self.addCleanup(args_file.unlink, missing_ok=True)
+        self.run_hook(FAKE_ARGS_OUT=str(args_file))
+        args = json.loads(args_file.read_text())
+        denied = {args[i + 1] for i, a in enumerate(args) if a == "--deny-tool"}
+        self.assertEqual(denied, {"write", "shell", "url"})
+        self.assertIn("--disable-builtin-mcps", args)
+
+    def test_reply_with_fences_and_prose_is_parsed(self):
+        self.start()
+        self.write("stats.py", "bug\n")
+        out = self.run_hook(FAKE_REPLY=f"Here is my review:\n```json\n{json.dumps(CHANGES)}\n```\n")
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("Navigatören (Copilot)", out["reason"])
+
+    def test_reply_without_json_releases_driver(self):
+        self.start()
+        self.write("stats.py", "changed\n")
+        out = self.run_hook(FAKE_REPLY="I could not review this.")
+        self.assertIn("Copilot-granskningen misslyckades", out["systemMessage"])
+
+    def test_malformed_comment_releases_driver(self):
+        self.start()
+        self.write("stats.py", "changed\n")
+        bad = {"verdict": "CHANGES", "summary": "x", "comments": [{"severity": "critical", "location": "a", "comment": "b"}]}
+        out = self.run_hook(bad)
+        self.assertIn("misslyckades", out["systemMessage"])
+
+    def test_unknown_navigator_releases_driver(self):
+        self.start()
+        self.write("stats.py", "changed\n")
+        out = self.run_hook(PAIR_NAVIGATOR="gemini")
+        self.assertIn("misslyckades", out["systemMessage"])
+        self.assertIn("unknown PAIR_NAVIGATOR", out["systemMessage"])
 
 
 if __name__ == "__main__":
